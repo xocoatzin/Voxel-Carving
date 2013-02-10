@@ -1,5 +1,26 @@
+# Compiled Object files
+*.slo
+*.lo
+*.o
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+
+# CMake stuff
 CMakeCache.txt
 CMakeFiles
 Makefile
 cmake_install.cmake
 install_manifest.txt
+
+# build directory
+build/
+
+# OSX trash
+.DS_Store
