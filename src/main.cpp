@@ -17,13 +17,15 @@
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkMarchingCubes.h>
+#include <vtkCleanPolyData.h>
+#include <vtkWindowedSincPolyDataFilter.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkActor.h>
 #include <vtkProperty.h>
 
-const int IMG_WIDTH = 720;
-const int IMG_HEIGHT = 576;
-const int VOXEL_DIM = 256;
+const int IMG_WIDTH = 1280;
+const int IMG_HEIGHT = 960;
+const int VOXEL_DIM = 128;
 const int VOXEL_SIZE = VOXEL_DIM*VOXEL_DIM*VOXEL_DIM;
 const int VOXEL_SLICE = VOXEL_DIM*VOXEL_DIM;
 
@@ -68,13 +70,37 @@ void exportModel(char *filename, vtkPolyData *polyData) {
     plyExporter->Write();
 }
 
+
+coord project(camera cam, voxel v) {
+    
+    coord im;
+    
+    /* project voxel into camera image coords */
+    float z =   cam.P.at<float>(2, 0) * v.xpos +
+    cam.P.at<float>(2, 1) * v.ypos +
+    cam.P.at<float>(2, 2) * v.zpos +
+    cam.P.at<float>(2, 3);
+    
+    im.y =    (cam.P.at<float>(1, 0) * v.xpos +
+               cam.P.at<float>(1, 1) * v.ypos +
+               cam.P.at<float>(1, 2) * v.zpos +
+               cam.P.at<float>(1, 3)) / z;
+    
+    im.x =    (cam.P.at<float>(0, 0) * v.xpos +
+               cam.P.at<float>(0, 1) * v.ypos +
+               cam.P.at<float>(0, 2) * v.zpos +
+               cam.P.at<float>(0, 3)) / z;
+    
+    return im;
+}
+
 void renderModel(float fArray[], startParams params) {
     
     /* create vtk visualization pipeline from voxel grid (float array) */
     vtkSmartPointer<vtkStructuredPoints> sPoints = vtkSmartPointer<vtkStructuredPoints>::New();
     sPoints->SetDimensions(VOXEL_DIM, VOXEL_DIM, VOXEL_DIM);
-    sPoints->SetSpacing(params.voxelWidth, params.voxelHeight, params.voxelDepth);
-    sPoints->SetOrigin(params.startX, params.startY, params.startZ);
+    sPoints->SetSpacing(params.voxelDepth, params.voxelHeight, params.voxelWidth);
+    sPoints->SetOrigin(params.startZ, params.startY, params.startX);
     sPoints->SetScalarTypeToFloat();
     
     vtkSmartPointer<vtkFloatArray> vtkFArray = vtkSmartPointer<vtkFloatArray>::New();
@@ -87,10 +113,25 @@ void renderModel(float fArray[], startParams params) {
     /* create iso surface with marching cubes algorithm */
     vtkSmartPointer<vtkMarchingCubes> mcSource = vtkSmartPointer<vtkMarchingCubes>::New();
     mcSource->SetInputConnection(sPoints->GetProducerPort());
-    mcSource->SetComputeNormals(1);
     mcSource->SetNumberOfContours(1);
     mcSource->SetValue(0,0.5);
     mcSource->Update();
+    
+    /* recreate mesh topology and merge vertices */
+    vtkSmartPointer<vtkCleanPolyData> cleanPolyData = vtkSmartPointer<vtkCleanPolyData>::New();
+    cleanPolyData->SetInputConnection(mcSource->GetOutputPort());
+    cleanPolyData->Update();
+    
+    /* smoothing mesh */
+    vtkSmartPointer<vtkWindowedSincPolyDataFilter> smoothing = vtkSmartPointer<vtkWindowedSincPolyDataFilter>::New();
+    smoothing->SetInputConnection(cleanPolyData->GetOutputPort());
+    smoothing->BoundarySmoothingOff();
+    smoothing->SetNumberOfIterations(17);
+    smoothing->SetFeatureEdgeSmoothing(0);
+    smoothing->SetFeatureAngle(120.0);
+    smoothing->SetPassBand(0.001);
+    smoothing->NonManifoldSmoothingOff();
+    smoothing->Update();
     
     /* usual render stuff */
     vtkSmartPointer<vtkRenderer> renderer = vtkSmartPointer<vtkRenderer>::New();
@@ -104,43 +145,18 @@ void renderModel(float fArray[], startParams params) {
     interactor->SetRenderWindow(renderWindow);
     
     vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
-    mapper->SetInputConnection(mcSource->GetOutputPort());
+    mapper->SetInputConnection(smoothing->GetOutputPort());
     
     vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
     actor->SetMapper(mapper);
     
     /* visible light properties */
-    actor->GetProperty()->SetSpecular(0.25);
-    actor->GetProperty()->SetAmbient(0.25);
-    actor->GetProperty()->SetDiffuse(0.25);
+    actor->GetProperty()->SetSpecular(0.15);
     actor->GetProperty()->SetInterpolationToPhong();
     renderer->AddActor(actor);
     
     renderWindow->Render();
     interactor->Start();
-}
-
-coord project(camera cam, voxel v) {
-    
-    coord im;
-    
-    /* project voxel into camera image coords */
-    float z =   cam.P.at<float>(2, 0) * v.xpos +
-                cam.P.at<float>(2, 1) * v.ypos +
-                cam.P.at<float>(2, 2) * v.zpos +
-                cam.P.at<float>(2, 3);
-        
-    im.y =    (cam.P.at<float>(1, 0) * v.xpos +
-               cam.P.at<float>(1, 1) * v.ypos +
-               cam.P.at<float>(1, 2) * v.zpos +
-               cam.P.at<float>(1, 3)) / z;
-
-    im.x =    (cam.P.at<float>(0, 0) * v.xpos +
-               cam.P.at<float>(0, 1) * v.ypos +
-               cam.P.at<float>(0, 2) * v.zpos +
-               cam.P.at<float>(0, 3)) / z;
-    
-    return im;
 }
 
 void carve(float fArray[], startParams params, camera cam) {
@@ -161,8 +177,8 @@ void carve(float fArray[], startParams params, camera cam) {
                 /* test if projected voxel is within image coords */
                 if (im.x > 0 && im.y > 0 && im.x < IMG_WIDTH && im.y < IMG_HEIGHT) {
                     
-                    /* clear any that are not inside the silhouette (color == 0) */
-                    if (cam.Silhouette.at<uchar>(im.y, im.x) == 0) {
+                    /* clear any that are not inside the silhouette (color = black) */
+                    if (cam.Silhouette.at<uchar>(im.y, im.x) == 255) {
                         fArray[i*VOXEL_SLICE+j*VOXEL_DIM+k] += v.value;
                     } 
                 }
@@ -182,13 +198,13 @@ int main(int argc, char* argv[]) {
         
         /* camera image */
         std::stringstream simg;
-        simg << "../../assets/viff." << std::setfill('0') << std::setw(3) << i << ".ppm";
+        simg << "../../assets/image_" << i << ".jpg";
         cv::Mat img = cv::imread(simg.str());
         
         /* silhouette */
         cv::Mat silhouette;
         cv::cvtColor(img, silhouette, CV_BGR2HSV);
-        cv::inRange(silhouette, cv::Scalar(100, 20, 65), cv::Scalar(160,255,255), silhouette);
+        cv::inRange(silhouette, cv::Scalar(0, 0, 30), cv::Scalar(255,255,255), silhouette);
         
         /* camera matrix */
         std::stringstream smat;
@@ -199,6 +215,11 @@ int main(int argc, char* argv[]) {
         /* decompose proj matrix to cam- and rot matrix and trans vect */
         cv::Mat K, R, t;
         cv::decomposeProjectionMatrix(P, K, R, t);
+        K = cv::Mat::eye(3, 3, CV_32FC1);
+        K.at<float>(0,0) = 1680.2631413061415; /* fx */
+        K.at<float>(1,1) = 1676.1202869984309; /* fy */
+        K.at<float>(0,2) = 621.59194200994375; /* cx */
+        K.at<float>(1,2) = 467.7223229477861; /* cy */
         
         camera c;
         c.Image = img;
@@ -211,21 +232,21 @@ int main(int argc, char* argv[]) {
         cameras.push_back(c);
     }
     
-    /* bounding box dimensions of dinosaur */
-    float xmin = -0.13066, ymin = -0.13066, zmin = -0.74832;
-    float xmax = 0.11556, ymax = 0.11556, zmax = -0.50210;
+    /* bounding box dimensions of squirrel */
+    float xmin = -6.21639, ymin = -10.2796, zmin = -14.0349;
+    float xmax = 7.62138, ymax = 12.1731, zmax = 12.5358;
             
-    float bbwidth = std::abs(xmax-xmin);
-    float bbheight = std::abs(ymax-ymin);
-    float bbdepth = std::abs(zmax-zmin);
+    float bbwidth = std::abs(xmax-xmin)*1.15;
+    float bbheight = std::abs(ymax-ymin)*1.15;
+    float bbdepth = std::abs(zmax-zmin)*1.05;
     
     startParams params;
-    params.startX = xmin - bbwidth*0.005;
-    params.startY = ymin - bbheight*0.005;
-    params.startZ = zmin - bbdepth*0.005;
-    params.voxelWidth = bbwidth*1.01/VOXEL_DIM;
-    params.voxelHeight = bbheight*1.01/VOXEL_DIM;
-    params.voxelDepth = bbdepth*1.01/VOXEL_DIM;
+    params.startX = xmin-std::abs(xmax-xmin)*0.15;
+    params.startY = ymin-std::abs(ymax-ymin)*0.15;
+    params.startZ = 0.0f;
+    params.voxelWidth = bbwidth/VOXEL_DIM;
+    params.voxelHeight = bbheight/VOXEL_DIM;
+    params.voxelDepth = bbdepth/VOXEL_DIM;
     
     /* 3 dimensional voxel grid */
     float *fArray = new float[VOXEL_SIZE];
@@ -241,8 +262,13 @@ int main(int argc, char* argv[]) {
         fArray[i] = 1.0f ? fArray[i] == 36.0f : 0.0f;
     }
 
-    cv::imshow("Dino" , cameras.at(1).Image);
-    cv::imshow("Dino Silhouette", cameras.at(1).Silhouette);
+    /* show example of segmented image */
+    cv::Mat original, segmented;
+    cv::resize(cameras.at(1).Image, original, cv::Size(640, 480));
+    cv::resize(cameras.at(1).Silhouette, segmented, cv::Size(640, 480));
+    cv::imshow("Squirrel" , original);
+    cv::imshow("Squirrel Silhouette", segmented);
+    
     renderModel(fArray, params);
     
     return 0;
