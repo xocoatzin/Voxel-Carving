@@ -18,7 +18,6 @@
 #include <vtkRenderWindowInteractor.h>
 #include <vtkMarchingCubes.h>
 #include <vtkCleanPolyData.h>
-#include <vtkWindowedSincPolyDataFilter.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkActor.h>
 #include <vtkProperty.h>
@@ -28,6 +27,7 @@ const int IMG_HEIGHT = 960;
 const int VOXEL_DIM = 128;
 const int VOXEL_SIZE = VOXEL_DIM*VOXEL_DIM*VOXEL_DIM;
 const int VOXEL_SLICE = VOXEL_DIM*VOXEL_DIM;
+const int OUTSIDE = 0;
 
 struct voxel {
     float xpos;
@@ -77,9 +77,9 @@ coord project(camera cam, voxel v) {
     
     /* project voxel into camera image coords */
     float z =   cam.P.at<float>(2, 0) * v.xpos +
-    cam.P.at<float>(2, 1) * v.ypos +
-    cam.P.at<float>(2, 2) * v.zpos +
-    cam.P.at<float>(2, 3);
+                cam.P.at<float>(2, 1) * v.ypos +
+                cam.P.at<float>(2, 2) * v.zpos +
+                cam.P.at<float>(2, 3);
     
     im.y =    (cam.P.at<float>(1, 0) * v.xpos +
                cam.P.at<float>(1, 1) * v.ypos +
@@ -122,17 +122,6 @@ void renderModel(float fArray[], startParams params) {
     cleanPolyData->SetInputConnection(mcSource->GetOutputPort());
     cleanPolyData->Update();
     
-    /* smoothing mesh */
-    vtkSmartPointer<vtkWindowedSincPolyDataFilter> smoothing = vtkSmartPointer<vtkWindowedSincPolyDataFilter>::New();
-    smoothing->SetInputConnection(cleanPolyData->GetOutputPort());
-    smoothing->BoundarySmoothingOff();
-    smoothing->SetNumberOfIterations(17);
-    smoothing->SetFeatureEdgeSmoothing(0);
-    smoothing->SetFeatureAngle(120.0);
-    smoothing->SetPassBand(0.001);
-    smoothing->NonManifoldSmoothingOff();
-    smoothing->Update();
-    
     /* usual render stuff */
     vtkSmartPointer<vtkRenderer> renderer = vtkSmartPointer<vtkRenderer>::New();
     renderer->SetBackground(.45, .45, .9);
@@ -145,7 +134,7 @@ void renderModel(float fArray[], startParams params) {
     interactor->SetRenderWindow(renderWindow);
     
     vtkSmartPointer<vtkPolyDataMapper> mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
-    mapper->SetInputConnection(smoothing->GetOutputPort());
+    mapper->SetInputConnection(cleanPolyData->GetOutputPort());
     
     vtkSmartPointer<vtkActor> actor = vtkSmartPointer<vtkActor>::New();
     actor->SetMapper(mapper);
@@ -160,7 +149,12 @@ void renderModel(float fArray[], startParams params) {
 }
 
 void carve(float fArray[], startParams params, camera cam) {
-        
+    
+    cv::Mat silhouette, distImage;
+    cv::Canny(cam.Silhouette, silhouette, 0, 255);
+    cv::bitwise_not(silhouette, silhouette);
+    cv::distanceTransform(silhouette, distImage, CV_DIST_L2, 3);
+    
     for (int i=0; i<VOXEL_DIM; i++) {
         for (int j=0; j<VOXEL_DIM; j++) {
             for (int k=0; k<VOXEL_DIM; k++) {
@@ -173,14 +167,18 @@ void carve(float fArray[], startParams params, camera cam) {
                 v.value = 1.0f;
                 
                 coord im = project(cam, v);
+                float dist = -1.0f;
                                 
                 /* test if projected voxel is within image coords */
                 if (im.x > 0 && im.y > 0 && im.x < IMG_WIDTH && im.y < IMG_HEIGHT) {
-                    
-                    /* clear any that are not inside the silhouette (color = black) */
-                    if (cam.Silhouette.at<uchar>(im.y, im.x) == 255) {
-                        fArray[i*VOXEL_SLICE+j*VOXEL_DIM+k] += v.value;
-                    } 
+                    dist = distImage.at<float>(im.y, im.x);
+                    if (cam.Silhouette.at<uchar>(im.y, im.x) == OUTSIDE) {
+                        dist *= -1.0f;
+                    }
+                }
+                
+                if (dist < fArray[i*VOXEL_SLICE+j*VOXEL_DIM+k]) {
+                    fArray[i*VOXEL_SLICE+j*VOXEL_DIM+k] = dist;
                 }
                 
             }
@@ -250,16 +248,11 @@ int main(int argc, char* argv[]) {
     
     /* 3 dimensional voxel grid */
     float *fArray = new float[VOXEL_SIZE];
-    std::fill_n(fArray, VOXEL_SIZE, 0.0f);
+    std::fill_n(fArray, VOXEL_SIZE, 1000.0f);
     
     /* carving model for every given camera image */
     for (int i=0; i<36; i++) {
         carve(fArray, params, cameras.at(i));
-    }
-    
-    /* remove anything outside the 3d model */
-    for (int i = 0; i < VOXEL_SIZE; i++) {
-        fArray[i] = 1.0f ? fArray[i] == 36.0f : 0.0f;
     }
 
     /* show example of segmented image */
